@@ -55,6 +55,7 @@ impl WorkspaceRoot {
     pub fn from_path(path: String) -> Result<Self> {
         use std::os::unix::fs::MetadataExt as _;
 
+        let path = normalize_workspace_root_path(path);
         let metadata = Path::new(&path)
             .metadata()
             .with_context(|| format!("error getting metadata for path {path:?}"))?;
@@ -70,6 +71,7 @@ impl WorkspaceRoot {
     pub fn from_path(path: String) -> Result<Self> {
         use winapi_util::{file, Handle};
 
+        let path = normalize_workspace_root_path(path);
         let handle =
             Handle::from_path_any(&path).with_context(|| format!("error opening path {path:?}"))?;
         let information = file::information(&handle)
@@ -81,6 +83,53 @@ impl WorkspaceRoot {
             file_id: information.file_index(),
         })
     }
+}
+
+/// Replace a non-directory workspace root path with the nearest ancestor
+/// directory
+///
+/// LSP clients which open a single file without a project folder may send
+/// the file's path as the workspace root in the `initialize` request.
+/// Language servers are spawned with the workspace root as their current
+/// directory, so using a file as the root would cause spawning to fail with
+/// a `Not a directory` OS error. If the workspace root is not a directory
+/// (or its type can't be determined), it's replaced with the nearest
+/// existing ancestor directory; if no parent component exists the current
+/// directory is used as a last resort.
+fn normalize_workspace_root_path(mut path: String) -> String {
+    let original = path.clone();
+    loop {
+        let is_dir = Path::new(&path)
+            .metadata()
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            break;
+        }
+
+        // Walk up to the parent directory, the loop terminates because each
+        // iteration strips the last path component. Paths without a parent
+        // component fall back to the current directory; if even that isn't
+        // usable give up and let the caller report the error.
+        let parent = Path::new(&path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.to_string_lossy().into_owned());
+        path = match parent {
+            Some(parent) => parent,
+            None if path == "." => return path,
+            None => ".".to_owned(),
+        };
+    }
+
+    if path != original {
+        warn!(
+            original = %original,
+            replaced_by = %path,
+            "workspace root is not a directory, using an ancestor directory as the current directory",
+        );
+    }
+    path
 }
 
 impl PartialEq for WorkspaceRoot {
@@ -1017,5 +1066,82 @@ async fn stdout_task(instance: Arc<Instance>, mut reader: LspReader<BufReader<Ch
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("lspmux-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn workspace_root_of_directory_is_unchanged() {
+        let dir = unique_temp_dir("dir");
+        fs::create_dir_all(&dir).unwrap();
+
+        let root = WorkspaceRoot::from_path(dir.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(Path::new(&root.path), dir.as_path());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_of_file_is_its_parent_directory() {
+        let dir = unique_temp_dir("file-root");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("test.json");
+        fs::write(&file, "{}").unwrap();
+
+        let file_root = WorkspaceRoot::from_path(file.to_string_lossy().into_owned()).unwrap();
+        let dir_root = WorkspaceRoot::from_path(dir.to_string_lossy().into_owned()).unwrap();
+
+        // The file's root resolves to its parent directory and is equal to
+        // the directory's root, so files in the same directory share a
+        // language server instance.
+        assert_eq!(Path::new(&file_root.path), dir.as_path());
+        assert_eq!(file_root, dir_root);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_of_file_with_trailing_slash_is_its_parent_directory() {
+        let dir = unique_temp_dir("file-root-slash");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("test.json");
+        fs::write(&file, "{}").unwrap();
+
+        // A file path with a trailing slash fails `metadata` with `ENOTDIR`
+        // and its parent is the file itself, so normalization must walk up
+        // one more level to the actual directory.
+        let root = WorkspaceRoot::from_path(format!("{}/", file.to_string_lossy())).unwrap();
+        assert_eq!(Path::new(&root.path), dir.as_path());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_of_nonexistent_path_is_its_nearest_ancestor_directory() {
+        let dir = unique_temp_dir("missing-root");
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist.json");
+
+        let root = WorkspaceRoot::from_path(missing.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(Path::new(&root.path), dir.as_path());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_without_parent_component_is_current_directory() {
+        let root = WorkspaceRoot::from_path(String::new()).unwrap();
+        assert_eq!(Path::new(&root.path), Path::new("."));
     }
 }
