@@ -282,8 +282,12 @@ async fn connect(
     }
     info!("initialized client");
 
-    task::spawn(input_task(client_rx, writer).in_current_span());
-    task::spawn(output_task(reader, client, instance).in_current_span());
+    // Keep the connection task alive until both socket halves finish so the
+    // server's active-client count reflects the actual client session.
+    tokio::join!(
+        input_task(client_rx, writer).in_current_span(),
+        output_task(reader, client, instance).in_current_span(),
+    );
 
     Ok(())
 }

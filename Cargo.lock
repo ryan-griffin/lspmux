@@ -211,6 +211,7 @@ dependencies = [
  "clap",
  "directories",
  "glob",
+ "libc",
  "percent-encoding",
  "pin-project-lite",
  "serde",

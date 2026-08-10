@@ -565,6 +565,15 @@ impl InstanceMap {
     pub fn instances(&self) -> Vec<Arc<Instance>> {
         self.0.values().cloned().collect()
     }
+
+    /// True when no language server instance is running or shutting down.
+    ///
+    /// The server uses this to exit once all instances have been garbage
+    /// collected, so that e.g. systemd socket activation can start it again
+    /// on the next connection.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Periodically check for for idle language server instances

@@ -4,6 +4,3 @@ Description=Language server multiplexer server
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/lspmux server
-
-[Install]
-WantedBy=default.target
