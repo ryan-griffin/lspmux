@@ -26,15 +26,36 @@ use crate::lsp::jsonrpc::{Message, Notification, Request, RequestId, ResponseSuc
 use crate::lsp::transport::{LspReader, LspWriter};
 use crate::lsp::{self, ext};
 
-/// Specifies server configuration
+/// Specifies the identity and launch configuration of a server.
 ///
-/// If another server with the same configuration is requested we can reuse it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// If another client requests the same server, arguments, and workspace we
+/// reuse the instance. The environment is retained for launching the first
+/// instance, but is intentionally not part of identity so clients started
+/// from different environments can share one language server.
+#[derive(Clone, Debug)]
 pub struct InstanceKey {
     pub server: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub workspace_root: WorkspaceRoot,
+}
+
+impl PartialEq for InstanceKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.server == other.server
+            && self.args == other.args
+            && self.workspace_root == other.workspace_root
+    }
+}
+
+impl Eq for InstanceKey {}
+
+impl Hash for InstanceKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.server.hash(state);
+        self.args.hash(state);
+        self.workspace_root.hash(state);
+    }
 }
 
 /// Represents workspace root as a unique directory
@@ -1088,6 +1109,34 @@ mod tests {
         let dir = env::temp_dir().join(format!("lspmux-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn instance_keys_with_different_environments_are_equal() {
+        let workspace_root = WorkspaceRoot::from_path(".".to_owned()).unwrap();
+
+        let mut first_env = BTreeMap::new();
+        first_env.insert("TERM".to_owned(), "xterm".to_owned());
+        let first = InstanceKey {
+            server: "rust-analyzer".to_owned(),
+            args: Vec::new(),
+            env: first_env,
+            workspace_root: workspace_root.clone(),
+        };
+
+        let mut second_env = BTreeMap::new();
+        second_env.insert("TERM".to_owned(), "alacritty".to_owned());
+        let second = InstanceKey {
+            server: "rust-analyzer".to_owned(),
+            args: Vec::new(),
+            env: second_env,
+            workspace_root,
+        };
+
+        assert_eq!(first, second);
+        let mut instances = HashMap::new();
+        instances.insert(first, ());
+        assert!(instances.contains_key(&second));
     }
 
     #[test]
